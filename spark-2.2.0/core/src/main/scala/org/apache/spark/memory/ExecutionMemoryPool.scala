@@ -95,7 +95,7 @@ private[memory] class ExecutionMemoryPool(
    */
   // 用于给taskAttemptId对应的任务尝试获取指定大小的内存
   private[memory] def acquireMemory(
-      numBytes: Long,
+      numBytes: Long, // 要进行申请的大小
       taskAttemptId: Long,
       maybeGrowPool: Long => Unit = (additionalSpaceNeeded: Long) => Unit,
       computeMaxPoolSize: () => Long = () => poolSize): Long = lock.synchronized {
@@ -106,9 +106,9 @@ private[memory] class ExecutionMemoryPool(
     // Add this task to the taskMemory map just so we can keep an accurate count of the number
     // of active tasks, to let other tasks ramp down their memory in calls to `acquireMemory`
     if (!memoryForTask.contains(taskAttemptId)) {0
-      memoryForTask(taskAttemptId) = 0L //
+      memoryForTask(taskAttemptId) = 0L //将taskAttemptId放入memoryForTask，并且taskAttemptId所消费的内存为0
       // This will later cause waiting tasks to wake up and check numTasks again
-      lock.notifyAll()
+      lock.notifyAll() // 唤醒其他等待获取ExecutionMemoryPool的锁的线程
     }
 
     // Keep looping until we're either sure that we don't want to grant this request (because this
@@ -122,6 +122,11 @@ private[memory] class ExecutionMemoryPool(
       // In every iteration of this loop, we should first try to reclaim any borrowed execution
       // space from storage. This is necessary because of the potential race condition where new
       // storage blocks may steal the free execution memory that this task was waiting for.
+
+      /**
+        * 用于回收StorageMemoryPool从当前ExecutionMemoryPool借用的内存，而且在StorageMemoryPool还有空闲空间时，从
+        * StorageMemoryPool借用内存，这可能导致StorageMemoryPool中的一些Block被驱赶出去
+        */
       maybeGrowPool(numBytes - memoryFree)
 
       // Maximum size the pool would have after potentially growing the pool.
@@ -134,8 +139,10 @@ private[memory] class ExecutionMemoryPool(
       val minMemoryPerTask = poolSize / (2 * numActiveTasks)
 
       // How much we can grant this task; keep its share within 0 <= X <= 1 / numActiveTasks
+     // 当前任务最大可申请的内存大小，小于等于所需的，大于等于实际有的（ 有多少拿多少）
       val maxToGrant = math.min(numBytes, math.max(0, maxMemoryPerTask - curMem))
       // Only give it as much memory as is free, which might be none if it reached 1 / numTasks
+      // 计算当前任务尝试真正可以申请获取的内存大小
       val toGrant = math.min(maxToGrant, memoryFree)
 
       // We want to let each task get at least 1 / (2 * numActiveTasks) before blocking;

@@ -8,37 +8,11 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
-            <option value="$PROJECT_DIR$/assembly" />
-            <option value="$PROJECT_DIR$/common/network-common" />
-            <option value="$PROJECT_DIR$/common/network-shuffle" />
-            <option value="$PROJECT_DIR$/common/sketch" />
-            <option value="$PROJECT_DIR$/common/tags" />
-            <option value="$PROJECT_DIR$/common/unsafe" />
-            <option value="$PROJECT_DIR$/core" />
-            <option value="$PROJECT_DIR$/dev" />
-            <option value="$PROJECT_DIR$/examples" />
-            <option value="$PROJECT_DIR$/external/flume" />
-            <option value="$PROJECT_DIR$/external/flume-assembly" />
-            <option value="$PROJECT_DIR$/external/flume-sink" />
-            <option value="$PROJECT_DIR$/external/kafka-0-10" />
-            <option value="$PROJECT_DIR$/external/kafka-0-10-assembly" />
-            <option value="$PROJECT_DIR$/external/kafka-0-10-sql" />
-            <option value="$PROJECT_DIR$/external/kafka-0-8" />
-            <option value="$PROJECT_DIR$/external/kafka-0-8-assembly" />
-            <option value="$PROJECT_DIR$/graphx" />
-            <option value="$PROJECT_DIR$/launcher" />
-            <option value="$PROJECT_DIR$/mllib" />
-            <option value="$PROJECT_DIR$/mllib-local" />
             <option value="$PROJECT_DIR$/project" />
-            <option value="$PROJECT_DIR$/repl" />
-            <option value="$PROJECT_DIR$/sql/catalyst" />
-            <option value="$PROJECT_DIR$/sql/core" />
-            <option value="$PROJECT_DIR$/sql/hive" />
-            <option value="$PROJECT_DIR$/streaming" />
-            <option value="$PROJECT_DIR$/tools" />
           </set>
         </option>
         <option name="sbtVersion" value="0.13.13" />
+        <option name="useAutoImport" value="true" />
       </SbtProjectSettings>
     </option>
   </component>
