@@ -91,7 +91,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
   private val checkTimeoutIntervalMs =
     sc.conf.getTimeAsSeconds("spark.network.timeoutInterval", s"${timeoutIntervalMs}ms") * 1000
 
-  private var timeoutCheckingTask: ScheduledFuture[_] = null
+  private var timeoutCheckingTask: ScheduledFuture[_] = null // 向eventLoopThread提交执行超时检查的定时任务后返回的ScheduledFuture，提交的定时任务的执行间隔为checkTimeoutIntervalMs
 
   // "eventLoopThread" is used to run some pretty fast actions. The actions running in it should not
   // block the thread for a long time.
@@ -103,6 +103,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
   private val killExecutorThread = ThreadUtils.newDaemonSingleThreadExecutor("kill-executor-thread")
 
   override def onStart(): Unit = {
+    // 创建定时调度timeoutCheckingTask，按照checkTimeoutIntervalMs指定的间隔，想HeartBeatReceiver自身发送ExpireDeadHosts消息
     timeoutCheckingTask = eventLoopThread.scheduleAtFixedRate(new Runnable {
       override def run(): Unit = Utils.tryLogNonFatalError {
         Option(self).foreach(_.ask[Boolean](ExpireDeadHosts))
@@ -113,7 +114,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
 
     // Messages sent and received locally
-    // HeartbeatReceiver接收到ExecutorRegistered消息后，取出Executor的ID，并将Id与事件戳放入executorLastSeen中，最后向HeartbeatReceiver自己回复true
+    // HeartbeatReceiver接收到ExecutorRegistered消息后，取出Executor的ID，并将Id与时间戳放入executorLastSeen中，最后向HeartbeatReceiver自己回复true
     case ExecutorRegistered(executorId) =>
       executorLastSeen(executorId) = clock.getTimeMillis()
       context.reply(true)
@@ -121,7 +122,7 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
     case ExecutorRemoved(executorId) =>
       executorLastSeen.remove(executorId)
       context.reply(true)
-    // HeartbeatReceiver接收到TaskSchedulerIsSet消息后，SparkContext的_taskScheduler属性持有的TaskScheduler引用，并用自身的Scheduler属性保存，最后向SparkContext回复true
+    // HeartbeatReceiver接收到TaskSchedulerIsSet消息后，获取SparkContext的_taskScheduler属性持有的TaskScheduler引用，并用自身的Scheduler属性保存，最后向SparkContext回复true
     case TaskSchedulerIsSet =>
       scheduler = sc.taskScheduler
       context.reply(true)
@@ -135,13 +136,14 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
       if (scheduler != null) {
         if (executorLastSeen.contains(executorId)) {
           executorLastSeen(executorId) = clock.getTimeMillis() // 更新Executor的最新时间
-          eventLoopThread.submit(new Runnable {
+          eventLoopThread.submit(new Runnable { // 提交用于调用TaskSchedulerImpl的executorHeartbeatReceived方法的任务
             override def run(): Unit = Utils.tryLogNonFatalError {
               // 返回true表示BlockManager存活
               val unknownExecutor = !scheduler.executorHeartbeatReceived(
                 executorId, accumUpdates, blockManagerId)
               val response = HeartbeatResponse(reregisterBlockManager = unknownExecutor)
               // HeartbeatResponse(reregisterBlockManager = false)不重新注册BlockManager
+              // 向Executor恢复HeartbeatResponse消息
               context.reply(response)
             }
           })
@@ -154,11 +156,11 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
           // HeartbeatResponse(reregisterBlockManager = true)要重新注册BlockManager
           context.reply(HeartbeatResponse(reregisterBlockManager = true))
         }
-      } else {
+      } else { // 若TaskSchedulerImpl为空
         // Because Executor will sleep several seconds before sending the first "Heartbeat", this
         // case rarely happens. However, if it really happens, log it and ask the executor to
         // register itself again.
-        // 使BlockManager重新注册
+        // 向Executor发送HeartbeatResponse消息，使BlockManager重新注册
         logWarning(s"Dropping $heartbeat because TaskScheduler is not ready yet")
         context.reply(HeartbeatResponse(reregisterBlockManager = true))
       }

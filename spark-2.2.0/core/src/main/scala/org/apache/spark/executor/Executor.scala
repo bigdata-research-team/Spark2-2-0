@@ -107,7 +107,7 @@ private[spark] class Executor(
   }
   private val executorSource = new ExecutorSource(threadPool, executorId) // Executor环境
   // Pool used for threads that supervise task killing / cancellation
-  // 可缓存线程池，
+  // 用于监督Task的Kill和取消
   private val taskReaperPool = ThreadUtils.newDaemonCachedThreadPool("Task reaper")
   // For tasks which are in the process of being killed, this map holds the most recently created
   // TaskReaper. All accesses to this map should be synchronized on the map itself (this isn't
@@ -188,9 +188,9 @@ private[spark] class Executor(
   private[executor] def numRunningTasks: Int = runningTasks.size()
 
   def launchTask(context: ExecutorBackend, taskDescription: TaskDescription): Unit = {
-    val tr = new TaskRunner(context, taskDescription)
-    runningTasks.put(taskDescription.taskId, tr)
-    threadPool.execute(tr)
+    val tr = new TaskRunner(context, taskDescription) // 创建TaskRunner
+    runningTasks.put(taskDescription.taskId, tr) // 将TaskId与TaskRunner的对应关系放入runningTasks
+    threadPool.execute(tr) // 执行TaskRunner
   }
 
   def killTask(taskId: Long, interruptThread: Boolean, reason: String): Unit = {
@@ -304,35 +304,37 @@ private[spark] class Executor(
     }
 
     override def run(): Unit = {
+      // 获取thread信息
       threadId = Thread.currentThread.getId
       Thread.currentThread.setName(threadName)
       val threadMXBean = ManagementFactory.getThreadMXBean
-      val taskMemoryManager = new TaskMemoryManager(env.memoryManager, taskId)
+      val taskMemoryManager = new TaskMemoryManager(env.memoryManager, taskId) // 创建taskManager
       val deserializeStartTime = System.currentTimeMillis()
       val deserializeStartCpuTime = if (threadMXBean.isCurrentThreadCpuTimeSupported) {
         threadMXBean.getCurrentThreadCpuTime
       } else 0L
       Thread.currentThread.setContextClassLoader(replClassLoader)
-      val ser = env.closureSerializer.newInstance()
+      val ser = env.closureSerializer.newInstance() // 对闭包序列化的实例
       logInfo(s"Running $taskName (TID $taskId)")
-      execBackend.statusUpdate(taskId, TaskState.RUNNING, EMPTY_BYTE_BUFFER)
+      execBackend.statusUpdate(taskId, TaskState.RUNNING, EMPTY_BYTE_BUFFER) // 更新Task为Running状态
       var taskStart: Long = 0
       var taskStartCpu: Long = 0
-      startGCTime = computeTotalGcTime()
+      startGCTime = computeTotalGcTime() // 计算JVM进程执行GC已经花费的时间
 
       try {
         // Must be set before updateDependencies() is called, in case fetching dependencies
         // requires access to properties contained within (e.g. for access control).
-        Executor.taskDeserializationProps.set(taskDescription.properties)
+        Executor.taskDeserializationProps.set(taskDescription.properties) // 反序列化task，并将task需要的属性信息放入threadPool
 
-        updateDependencies(taskDescription.addedFiles, taskDescription.addedJars)
-        task = ser.deserialize[Task[Any]](
+        updateDependencies(taskDescription.addedFiles, taskDescription.addedJars) // 获取所需要的资源依赖
+        task = ser.deserialize[Task[Any]]( // 反序列化得到task实例
           taskDescription.serializedTask, Thread.currentThread.getContextClassLoader)
         task.localProperties = taskDescription.properties
-        task.setTaskMemoryManager(taskMemoryManager)
+        task.setTaskMemoryManager(taskMemoryManager) // 将taskMemoryManager设置为task的内存管理器
 
         // If this task has been killed before we deserialized it, let's quit now. Otherwise,
         // continue executing the task.
+        // 如果task在反序列化之前被kill，则退出，否则继续执行
         val killReason = reasonIfKilled
         if (killReason.isDefined) {
           // Throw an exception rather than returning, because returning within a try{} block
@@ -351,6 +353,7 @@ private[spark] class Executor(
           threadMXBean.getCurrentThreadCpuTime
         } else 0L
         var threwException = true
+        // 运行Task
         val value = try {
           val res = task.run(
             taskAttemptId = taskId,
@@ -358,11 +361,11 @@ private[spark] class Executor(
             metricsSystem = env.metricsSystem)
           threwException = false
           res
-        } finally {
-          val releasedLocks = env.blockManager.releaseAllLocksForTask(taskId)
-          val freedMemory = taskMemoryManager.cleanUpAllAllocatedMemory()
+        } finally { // 资源回收
+          val releasedLocks = env.blockManager.releaseAllLocksForTask(taskId) // 释放被当前任务尝试占用的所有Block锁
+          val freedMemory = taskMemoryManager.cleanUpAllAllocatedMemory() // 清空分配给任务尝试的内存
 
-          if (freedMemory > 0 && !threwException) {
+          if (freedMemory > 0 && !threwException) { // 如果没释放干净抛异常或打警告
             val errMsg = s"Managed memory leak detected; size = $freedMemory bytes, TID = $taskId"
             if (conf.getBoolean("spark.unsafe.exceptionOnMemoryLeak", false)) {
               throw new SparkException(errMsg)
@@ -371,7 +374,7 @@ private[spark] class Executor(
             }
           }
 
-          if (releasedLocks.nonEmpty && !threwException) {
+          if (releasedLocks.nonEmpty && !threwException) { // 如果Block锁无法释放，抛异常或打警告
             val errMsg =
               s"${releasedLocks.size} block locks were not released by TID = $taskId:\n" +
                 releasedLocks.mkString("[", ", ", "]")
@@ -398,11 +401,13 @@ private[spark] class Executor(
         // If the task has been killed, let's fail it.
         task.context.killTaskIfInterrupted()
 
+        // 对task执行返回的结果value进行序列化处理
         val resultSer = env.serializer.newInstance()
         val beforeSerialization = System.currentTimeMillis()
         val valueBytes = resultSer.serialize(value)
         val afterSerialization = System.currentTimeMillis()
 
+        // 更新度量
         // Deserialization happens in two parts: first, we deserialize a Task object, which
         // includes the Partition. Second, Task.run() deserializes the RDD and function to be run.
         task.metrics.setExecutorDeserializeTime(
@@ -423,29 +428,38 @@ private[spark] class Executor(
         val serializedDirectResult = ser.serialize(directResult)
         val resultSize = serializedDirectResult.limit
 
+        // 将执行结果发送给Driver
         // directSend = sending directly back to the driver
         val serializedResult: ByteBuffer = {
+          // 如果maxResultSize大于0且任务尝试运行的结果大于maxResultSize，
           if (maxResultSize > 0 && resultSize > maxResultSize) {
             logWarning(s"Finished $taskName (TID $taskId). Result is larger than maxResultSize " +
               s"(${Utils.bytesToString(resultSize)} > ${Utils.bytesToString(maxResultSize)}), " +
               s"dropping it.")
+            // 只会将结果大小序列化，并且不会保存执行结果
             ser.serialize(new IndirectTaskResult[Any](TaskResultBlockId(taskId), resultSize))
+            // 如果任务尝试运行的结果小于maxResultSize，且大于maxDirectResultSize，
           } else if (resultSize > maxDirectResultSize) {
             val blockId = TaskResultBlockId(taskId)
             env.blockManager.putBytes(
               blockId,
               new ChunkedByteBuffer(serializedDirectResult.duplicate()),
+              // 则将结果写入本地存储
               StorageLevel.MEMORY_AND_DISK_SER)
             logInfo(
               s"Finished $taskName (TID $taskId). $resultSize bytes result sent via BlockManager)")
+            // 并将结果大小序列化
             ser.serialize(new IndirectTaskResult[Any](blockId, resultSize))
+            // 如果任务尝试运行的结果小于等于maxDirectResultSize，
           } else {
             logInfo(s"Finished $taskName (TID $taskId). $resultSize bytes result sent to driver")
+            // 则将结果序列化
             serializedDirectResult
           }
         }
 
         setTaskFinishedAndClearInterruptStatus()
+        // 将Task状态更新为Finished，并将序列化的数据发行给Driver
         execBackend.statusUpdate(taskId, TaskState.FINISHED, serializedResult)
 
       } catch {

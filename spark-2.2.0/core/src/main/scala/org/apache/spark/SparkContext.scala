@@ -507,7 +507,7 @@ class SparkContext(config: SparkConf) extends Logging {
     _schedulerBackend = sched
     _taskScheduler = ts
     _dagScheduler = new DAGScheduler(this)
-    // Sparkcontext 向HeartbeatReceiver发送TaskSchedulerIsSet消息
+    // Sparkcontext 向HeartbeatReceiver发送TaskSchedulerIsSet消息，创建完成
     _heartbeatReceiver.ask[Boolean](TaskSchedulerIsSet)
 
     // start TaskScheduler after taskScheduler sets DAGScheduler reference in DAGScheduler's
