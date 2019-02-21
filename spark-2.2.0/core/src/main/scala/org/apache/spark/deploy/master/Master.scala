@@ -40,51 +40,63 @@ import org.apache.spark.util.{ThreadUtils, Utils}
 
 private[deploy] class Master(
     override val rpcEnv: RpcEnv,
-    address: RpcAddress,
-    webUiPort: Int,
-    val securityMgr: SecurityManager,
+    address: RpcAddress, // RpcEnv的地址（RPCAddress）只包含host和port，用来记录MasterURL的host和port
+    webUiPort: Int, // WebUI的端口
+    val securityMgr: SecurityManager, // SecurityManager，Spark的安全机制管理器，在创建SparkEnv的时候初始化
     val conf: SparkConf)
   extends ThreadSafeRpcEndpoint with Logging with LeaderElectable {
 
+  // 主要用于运行checkForWorkerTimeOutTask和recoveryCompletionTask
   private val forwardMessageThread =
     ThreadUtils.newDaemonSingleThreadScheduledExecutor("master-forward-message-thread")
 
+  // Hadoop的配置
   private val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
 
   // For application IDs
   private def createDateFormat = new SimpleDateFormat("yyyyMMddHHmmss", Locale.US)
 
-  private val WORKER_TIMEOUT_MS = conf.getLong("spark.worker.timeout", 60) * 1000
+  private val WORKER_TIMEOUT_MS = conf.getLong("spark.worker.timeout", 60) * 1000 // worker的超时时间，可通过spark.worker.timeout属性配置，默认60s
+
+  //completedApps中最多可以保留的ApplicationInfo的数量的限制大小。当completedApps中的ApplicationInfo数量大于等于RETAINED_APPLICATIONS时，需要对completedApps中的部分ApplicationInfo进行清除，
+  // 可通过spark.deploy.retainedApplications属性进行配置，默认为200
   private val RETAINED_APPLICATIONS = conf.getInt("spark.deploy.retainedApplications", 200)
+
+  //completedDrivers中最多可以保留的DriverInfo的数量的限制大小。当completedDrivers中的DriverInfo数量大于等于RETAINED_DRIVERS时，需要对completedDrivers中的部分DriverInfo进行清除，
+  // 可通过spark.deploy.retainedDrivers属性进行配置，默认为200
   private val RETAINED_DRIVERS = conf.getInt("spark.deploy.retainedDrivers", 200)
-  private val REAPER_ITERATIONS = conf.getInt("spark.dead.worker.persistence", 15)
-  private val RECOVERY_MODE = conf.get("spark.deploy.recoveryMode", "NONE")
-  private val MAX_EXECUTOR_RETRIES = conf.getInt("spark.deploy.maxExecutorRetries", 10)
 
-  val workers = new HashSet[WorkerInfo]
-  val idToApp = new HashMap[String, ApplicationInfo]
-  private val waitingApps = new ArrayBuffer[ApplicationInfo]
-  val apps = new HashSet[ApplicationInfo]
+  private val REAPER_ITERATIONS = conf.getInt("spark.dead.worker.persistence", 15) // 从worker中移除处于死亡（DEAD）状态的Worker所对应的WorkerInfo的权重，可通过spark.dead.worker.persistence属性配置，默认15
+  private val RECOVERY_MODE = conf.get("spark.deploy.recoveryMode", "NONE") // 恢复模式，可通过spark.deploy.recoveryMode属性配置，默认为NONE
+  private val MAX_EXECUTOR_RETRIES = conf.getInt("spark.deploy.maxExecutorRetries", 10) // Executor的最大重试数，可通过spark.deploy.maxExecutorRetries属性配置，默认为10
 
-  private val idToWorker = new HashMap[String, WorkerInfo]
-  private val addressToWorker = new HashMap[RpcAddress, WorkerInfo]
+  val workers = new HashSet[WorkerInfo] // 所有注册到Master的Worker信息（WorkerInfo）的集合
+  val idToApp = new HashMap[String, ApplicationInfo] // ApplicationId与ApplicationInfo之间的映射关系
+  private val waitingApps = new ArrayBuffer[ApplicationInfo] // 正等待调度的Application所对应的ApplicationInfo的集合
+  val apps = new HashSet[ApplicationInfo] // 所有ApplicationInfo的集合
 
-  private val endpointToApp = new HashMap[RpcEndpointRef, ApplicationInfo]
-  private val addressToApp = new HashMap[RpcAddress, ApplicationInfo]
-  private val completedApps = new ArrayBuffer[ApplicationInfo]
-  private var nextAppNumber = 0
+  private val idToWorker = new HashMap[String, WorkerInfo] // WorkerId和WorkInfo之间的映射关系
+  private val addressToWorker = new HashMap[RpcAddress, WorkerInfo] // Worker的RPCEnv的地址（RPCAddress）与WorkerInfo的映射关系
 
-  private val drivers = new HashSet[DriverInfo]
-  private val completedDrivers = new ArrayBuffer[DriverInfo]
+  private val endpointToApp = new HashMap[RpcEndpointRef, ApplicationInfo] // RPCEndpointRef与ApplicationInfo之间的映射关系
+  private val addressToApp = new HashMap[RpcAddress, ApplicationInfo] // Application对应Driver的RPCEnv的地址（RPCAddress）与ApplicationInfo之间的映射关系
+  private val completedApps = new ArrayBuffer[ApplicationInfo] // 已经完成的ApplicationInfo集合
+  private var nextAppNumber = 0 // 下一个Application编号，nextAPPNumber将参与到ApplicationID的生成规则中
+
+  private val drivers = new HashSet[DriverInfo] // 所有的DriverInfo集合
+  private val completedDrivers = new ArrayBuffer[DriverInfo] // 已经完成的DriverInfo的集合
   // Drivers currently spooled for scheduling
-  private val waitingDrivers = new ArrayBuffer[DriverInfo]
-  private var nextDriverNumber = 0
+  private val waitingDrivers = new ArrayBuffer[DriverInfo] // 正在等待调度的Driver所对应的DriverInfo的集合
+  private var nextDriverNumber = 0 // 下一个Driver编号
 
   Utils.checkHost(address.host, "Expected hostname")
 
+  // Masterde 的度量系统
   private val masterMetricsSystem = MetricsSystem.createMetricsSystem("master", conf, securityMgr)
+  // Application的度量系统
   private val applicationMetricsSystem = MetricsSystem.createMetricsSystem("applications", conf,
     securityMgr)
+  // 有关Master的度量来源
   private val masterSource = new MasterSource(this)
 
   // After onStart, webUi will be set

@@ -30,13 +30,10 @@ private[spark] trait SparkListenerBus
       listener: SparkListenerInterface, // 监听器
       event: SparkListenerEvent): Unit = {  // 事件
     event match {
-
-        // ==================================================
       case stageSubmitted: SparkListenerStageSubmitted =>
         listener.onStageSubmitted(stageSubmitted)
       case stageCompleted: SparkListenerStageCompleted =>
         listener.onStageCompleted(stageCompleted)
-       // ==================================================
       case jobStart: SparkListenerJobStart =>
         listener.onJobStart(jobStart)
       case jobEnd: SparkListenerJobEnd =>

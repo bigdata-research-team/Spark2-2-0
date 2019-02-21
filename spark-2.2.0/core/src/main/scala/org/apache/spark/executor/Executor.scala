@@ -791,7 +791,7 @@ private[spark] class Executor(
     // TODO 获取心跳定时器第一次执行的时间延迟initialDelay。（intervalMs + 随机数）
     val initialDelay = intervalMs + (math.random * intervalMs).asInstanceOf[Int]
 
-    // 通过Utils.logUncaughtExceptions方法调用reportHeartBeat方法报告信条
+    // 通过Utils.logUncaughtExceptions方法调用reportHeartBeat方法报告心跳
     val heartbeatTask = new Runnable() { // 向Driver报告心跳
       override def run(): Unit = Utils.logUncaughtExceptions(reportHeartBeat())
     }
