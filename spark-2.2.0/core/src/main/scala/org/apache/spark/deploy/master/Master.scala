@@ -102,20 +102,26 @@ private[deploy] class Master(
   // After onStart, webUi will be set
   private var webUi: MasterWebUI = null
 
+  // Master的公开地址，可通过Java系统环境变量SPARK_PUBLIC_DNS配置，默认为Master的RPCEnv地址
   private val masterPublicAddress = {
     val envVar = conf.getenv("SPARK_PUBLIC_DNS")
     if (envVar != null) envVar else address.host
   }
 
+  // Master的SparkURL
   private val masterUrl = address.toSparkURL
   private var masterWebUiUrl: String = _
 
+  // Master所处的状态。
   private var state = RecoveryState.STANDBY
 
+  // 持久化引擎
   private var persistenceEngine: PersistenceEngine = _
 
+  // Leader选举代理
   private var leaderElectionAgent: LeaderElectionAgent = _
 
+  // 当Master被选举为领导后，用于集群状态恢复的任务
   private var recoveryCompletionTask: ScheduledFuture[_] = _
 
   private var checkForWorkerTimeOutTask: ScheduledFuture[_] = _
@@ -123,15 +129,23 @@ private[deploy] class Master(
   // As a temporary workaround before better ways of configuring memory, we allow users to set
   // a flag that will perform round-robin scheduling across the nodes (spreading out each app
   // among all the nodes) instead of trying to consolidate each app onto a small # of nodes.
+  // 是否允许Application能够在所有节点间调度，在所有节点间执行循环调度时Spark实现更好的配置内存方法之前的临时解决方案，
+  // 通过此方案可以避免Application总是固定在一小群节点上执行。可通过spark.deploy.spreadOut属性配置，默认为true
+  //
+  //为true时，将会把executor分配到尽可能多的worker上，因此通常都能提供非常良好的数据本地性。
+  //如果设置为false(不建议)，会将executor优先分配到一台机器中，能提供更高的机器使用率。
   private val spreadOutApps = conf.getBoolean("spark.deploy.spreadOut", true)
 
   // Default maxCores for applications that don't specify it (i.e. pass Int.MaxValue)
+  // 应用程序默认的最大内核数，可通过spark.deploy.defaultCores属性配置，默认为java.lang.Integer.MAX_VALUE
   private val defaultCores = conf.getInt("spark.deploy.defaultCores", Int.MaxValue)
+  // SparkUI是否采用反向代理
   val reverseProxy = conf.getBoolean("spark.ui.reverseProxy", false)
   if (defaultCores < 1) {
     throw new SparkException("spark.deploy.defaultCores must be positive")
   }
 
+  // REST架构
   // Alternative application submission gateway that is stable across Spark versions
   private val restServerEnabled = conf.getBoolean("spark.master.rest.enabled", true)
   private var restServer: Option[StandaloneRestServer] = None
@@ -140,27 +154,32 @@ private[deploy] class Master(
   override def onStart(): Unit = {
     logInfo("Starting Spark master at " + masterUrl)
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
-    webUi = new MasterWebUI(this, webUiPort)
-    webUi.bind()
-    masterWebUiUrl = "http://" + masterPublicAddress + ":" + webUi.boundPort
-    if (reverseProxy) {
+    webUi = new MasterWebUI(this, webUiPort) // 创建MasterUI
+    webUi.bind() // 绑定端口
+    masterWebUiUrl = "http://" + masterPublicAddress + ":" + webUi.boundPort // 拼接URL
+    if (reverseProxy) { // 如果启动SparkUI的反向代理，将masterWebUiURL设置为从spark.ui.reverseProxyUrl属性获得反向代理的URL
       masterWebUiUrl = conf.get("spark.ui.reverseProxyUrl", masterWebUiUrl)
       logInfo(s"Spark Master is acting as a reverse proxy. Master, Workers and " +
        s"Applications UIs are available at $masterWebUiUrl")
     }
+    // 启动检查Worker超时的定时任务，执行间隔为WORKER_TIMEOUT_MS，向自身发送，在receive里处理
     checkForWorkerTimeOutTask = forwardMessageThread.scheduleAtFixedRate(new Runnable {
       override def run(): Unit = Utils.tryLogNonFatalError {
         self.send(CheckForWorkerTimeOut)
       }
     }, 0, WORKER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
 
+    // REST服务相关
     if (restServerEnabled) {
       val port = conf.getInt("spark.master.rest.port", 6066)
       restServer = Some(new StandaloneRestServer(address.host, port, conf, self, masterUrl))
     }
     restServerBoundPort = restServer.map(_.start())
 
+    // master度量相关
+    // 将masterSource注册到masterMetricsSystem
     masterMetricsSystem.registerSource(masterSource)
+    // 启动
     masterMetricsSystem.start()
     applicationMetricsSystem.start()
     // Attach the master and app metrics servlet handler to the web ui after the metrics systems are
@@ -168,24 +187,29 @@ private[deploy] class Master(
     masterMetricsSystem.getServletHandlers.foreach(webUi.attachHandler)
     applicationMetricsSystem.getServletHandlers.foreach(webUi.attachHandler)
 
+    // 根据RECOVER_MODE创建持久化引擎和选举Leader代理
     val serializer = new JavaSerializer(conf)
     val (persistenceEngine_, leaderElectionAgent_) = RECOVERY_MODE match {
+        // 若为zookeeper则为ZooKeeperPersistenceEngine和ZooKeeperLeaderElectionAgent
       case "ZOOKEEPER" =>
         logInfo("Persisting recovery state to ZooKeeper")
         val zkFactory =
           new ZooKeeperRecoveryModeFactory(conf, serializer)
         (zkFactory.createPersistenceEngine(), zkFactory.createLeaderElectionAgent(this))
+        // 若为FILESYSTEM则为FileSystemPersistenceEngine和MonarchyLeaderAgent
       case "FILESYSTEM" =>
         val fsFactory =
           new FileSystemRecoveryModeFactory(conf, serializer)
         (fsFactory.createPersistenceEngine(), fsFactory.createLeaderElectionAgent(this))
+        // 若为CUSTOM则可以通过属性spark.deploy.recoveryMode.factory配置创建持久化引擎和代理
       case "CUSTOM" =>
         val clazz = Utils.classForName(conf.get("spark.deploy.recoveryMode.factory"))
         val factory = clazz.getConstructor(classOf[SparkConf], classOf[Serializer])
           .newInstance(conf, serializer)
           .asInstanceOf[StandaloneRecoveryModeFactory]
         (factory.createPersistenceEngine(), factory.createLeaderElectionAgent(this))
-      case _ =>
+        // 若为其他值，则分别为BlackHolePersistenceEngine和MonarchyLeaderAgent
+      case _ => // 走NONE，Master的receive匹配ElectedLeader，自行恢复
         (new BlackHolePersistenceEngine(), new MonarchyLeaderAgent(this))
     }
     persistenceEngine = persistenceEngine_
@@ -1041,8 +1065,8 @@ private[deploy] object Master extends Logging {
   def main(argStrings: Array[String]) {
     Utils.initDaemon(log)
     val conf = new SparkConf
-    val args = new MasterArguments(argStrings, conf)
-    val (rpcEnv, _, _) = startRpcEnvAndEndpoint(args.host, args.port, args.webUiPort, conf)
+    val args = new MasterArguments(argStrings, conf) // 创建MasterArguments以对执行main函数时传递的参数进行解析，在解析过程中会将Spark属性配置文件中以spark.开头的属性保存到SparkConf
+    val (rpcEnv, _, _) = startRpcEnvAndEndpoint(args.host, args.port, args.webUiPort, conf) // 创建并启动Master对象
     rpcEnv.awaitTermination()
   }
 
@@ -1057,11 +1081,11 @@ private[deploy] object Master extends Logging {
       port: Int,
       webUiPort: Int,
       conf: SparkConf): (RpcEnv, Int, Option[Int]) = {
-    val securityMgr = new SecurityManager(conf)
-    val rpcEnv = RpcEnv.create(SYSTEM_NAME, host, port, conf, securityMgr)
-    val masterEndpoint = rpcEnv.setupEndpoint(ENDPOINT_NAME,
+    val securityMgr = new SecurityManager(conf) // 创建securityManager
+    val rpcEnv = RpcEnv.create(SYSTEM_NAME, host, port, conf, securityMgr) // 创建RPCEnv
+    val masterEndpoint = rpcEnv.setupEndpoint(ENDPOINT_NAME, // 创建Master，并将Master注册到已创建的RPCEnv中，会触发Master的onStart方法
       new Master(rpcEnv, rpcEnv.address, webUiPort, securityMgr, conf))
-    val portsResponse = masterEndpoint.askSync[BoundPortsResponse](BoundPortsRequest)
-    (rpcEnv, portsResponse.webUIPort, portsResponse.restPort)
+    val portsResponse = masterEndpoint.askSync[BoundPortsResponse](BoundPortsRequest) // 通过Master的RPCEndpointRef，向Master发送BoundPortsRequest消息，并获得返回的BoundPortsResponse消息
+    (rpcEnv, portsResponse.webUIPort, portsResponse.restPort) // 返回创建的RPCEnv、BoundPortsResponse消息携带的WebUIPort、REST服务的端口等信息
   }
 }
