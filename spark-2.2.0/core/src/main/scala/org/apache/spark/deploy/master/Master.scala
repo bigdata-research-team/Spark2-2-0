@@ -235,7 +235,9 @@ private[deploy] class Master(
     leaderElectionAgent.stop()
   }
 
+  // 选举Leader
   override def electedLeader() {
+    // 向自身发送ElectedLeader消息，由receive方法接收处理
     self.send(ElectedLeader)
   }
 
@@ -245,17 +247,24 @@ private[deploy] class Master(
 
   override def receive: PartialFunction[Any, Unit] = {
     case ElectedLeader =>
+      // 从持久化引擎中读取持久化的ApplicationInfo，DriverInfo，WorkInfo等信息
       val (storedApps, storedDrivers, storedWorkers) = persistenceEngine.readPersistedData(rpcEnv)
+      // 如果没有持久化信息
       state = if (storedApps.isEmpty && storedDrivers.isEmpty && storedWorkers.isEmpty) {
+        // 将Master状态设置为ALIVE
         RecoveryState.ALIVE
       } else {
+        // 否则设置为RECOVERING
         RecoveryState.RECOVERING
       }
       logInfo("I have been elected leader! New state: " + state)
+      // 如果Master状态为RECOVERING
       if (state == RecoveryState.RECOVERING) {
+        // 对整个集群进行恢复
         beginRecovery(storedApps, storedDrivers, storedWorkers)
         recoveryCompletionTask = forwardMessageThread.schedule(new Runnable {
           override def run(): Unit = Utils.tryLogNonFatalError {
+            // 恢复完成后在WORKER_TIMEOUT_MS指定的时间后面向Master发送CompleteRecovery消息
             self.send(CompleteRecovery)
           }
         }, WORKER_TIMEOUT_MS, TimeUnit.MILLISECONDS)
@@ -545,28 +554,34 @@ private[deploy] class Master(
 
   private def beginRecovery(storedApps: Seq[ApplicationInfo], storedDrivers: Seq[DriverInfo],
       storedWorkers: Seq[WorkerInfo]) {
+    // 遍历从持久化引擎中读取ApplicationInfo
     for (app <- storedApps) {
       logInfo("Trying to recover app: " + app.id)
       try {
-        registerApplication(app)
-        app.state = ApplicationState.UNKNOWN
-        app.driver.send(MasterChanged(self, masterWebUiUrl))
+        registerApplication(app) // 注册ApplicationInfo，将ApplicationInfo添加到apps、idToApp、endpointToApp、addressToApp、waitingApps等缓存中
+        app.state = ApplicationState.UNKNOWN // 将ApplicationInfo状态设置为UNKNOW
+        app.driver.send(MasterChanged(self, masterWebUiUrl)) // 向Driver发送MasterChanged消息（此消息将携带被选举为领导的Master和次Master的属性）。完成恢复后Driver将调用completeRecovery
       } catch {
         case e: Exception => logInfo("App " + app.id + " had exception on reconnect")
       }
     }
 
+    // 遍历从持久化引擎中读取DriverInfo，将每个DriverInfo添加到drivers缓存
     for (driver <- storedDrivers) {
       // Here we just read in the list of drivers. Any drivers associated with now-lost workers
       // will be re-launched when we detect that the worker is missing.
       drivers += driver
     }
 
+    // 遍历从持久化引擎中读取的workerInfo，对每个WorkerInfo
     for (worker <- storedWorkers) {
       logInfo("Trying to recover worker: " + worker.id)
       try {
+        // 注册worker，将Workerinfo添加到workers、IdToWorker、addressToWorker等缓存中
         registerWorker(worker)
+        // 将WorkerInfo状态修改为UNKNOW
         worker.state = WorkerState.UNKNOWN
+        // 向Worker发送MasterChanged消息（此消息将携带被选举为领导的Master和次Master的属性）
         worker.endpoint.send(MasterChanged(self, masterWebUiUrl))
       } catch {
         case e: Exception => logInfo("Worker " + worker.id + " had exception on reconnect")
@@ -576,30 +591,39 @@ private[deploy] class Master(
 
   private def completeRecovery() {
     // Ensure "only-once" recovery semantics using a short synchronization period.
+    // 如果Master状态不是RECOVERING，直接返回
     if (state != RecoveryState.RECOVERING) { return }
     state = RecoveryState.COMPLETING_RECOVERY
 
+    /**
+      * Master会向持久化引擎中恢复的Worker活Application发送MasterChanged消息，接受到消息后Worker或Application会向新的Master发送重连请求，
+      * Master接受到请求后更改发送请求的Worker或Application的状态，而故障的Worker或Application状态依然是UNKNOW
+      */
     // Kill off any workers and apps that didn't respond to us.
+    // 将Workers中所有状态为UNKNOW的WorkerInfo，通过调用removeWorker方法全部移除掉
     workers.filter(_.state == WorkerState.UNKNOWN).foreach(removeWorker)
+    // 将apps中所有状态为UNKNOW的ApplicationInfo，通过调用finishApplication方法从Master中移除掉
     apps.filter(_.state == ApplicationState.UNKNOWN).foreach(finishApplication)
 
     // Update the state of recovered apps to RUNNING
     apps.filter(_.state == ApplicationState.WAITING).foreach(_.state = ApplicationState.RUNNING)
 
     // Reschedule drivers which were not claimed by any workers
+    // 从drivers中过滤出还没有分配Worker的所有DriverInfo
     drivers.filter(_.worker.isEmpty).foreach { d =>
       logWarning(s"Driver ${d.id} was not found after master recovery")
-      if (d.desc.supervise) {
+      if (d.desc.supervise) { // 如果Driver是被监管的
         logWarning(s"Re-launching ${d.id}")
-        relaunchDriver(d)
+        relaunchDriver(d) // 重新调度运行指定的Driver
       } else {
+        // 否则移除Master维护的关于指定的Driver的相关信息和状态
         removeDriver(d.id, DriverState.ERROR, None)
         logWarning(s"Did not re-launch ${d.id} because it was not supervised")
       }
     }
-
+    // 将Master的状态设置为ALIVE
     state = RecoveryState.ALIVE
-    schedule()
+    schedule() // 进行资源调度
     logInfo("Recovery complete - resuming operations!")
   }
 
@@ -1000,13 +1024,15 @@ private[deploy] class Master(
   private def timeOutDeadWorkers() {
     // Copy the workers into an array so we don't modify the hashset while iterating through it
     val currentTime = System.currentTimeMillis()
+    // 过滤所有超时的worker
     val toRemove = workers.filter(_.lastHeartbeat < currentTime - WORKER_TIMEOUT_MS).toArray
     for (worker <- toRemove) {
-      if (worker.state != WorkerState.DEAD) {
+      if (worker.state != WorkerState.DEAD) { // 判断workInfo状态是不是Dead
         logWarning("Removing %s because we got no heartbeat in %d seconds".format(
           worker.id, WORKER_TIMEOUT_MS / 1000))
-        removeWorker(worker)
+        removeWorker(worker) // 如果不是则调用removeWorker方法
       } else {
+        // 如果是则等待足够长的时间后将它从workers列表中移除
         if (worker.lastHeartbeat < currentTime - ((REAPER_ITERATIONS + 1) * WORKER_TIMEOUT_MS)) {
           workers -= worker // we've seen this DEAD worker in the UI, etc. for long enough; cull it
         }
