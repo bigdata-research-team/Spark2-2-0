@@ -209,7 +209,7 @@ private[deploy] class Master(
           .asInstanceOf[StandaloneRecoveryModeFactory]
         (factory.createPersistenceEngine(), factory.createLeaderElectionAgent(this))
         // 若为其他值，则分别为BlackHolePersistenceEngine和MonarchyLeaderAgent
-      case _ => // 走NONE，Master的receive匹配ElectedLeader，自行恢复
+      case _ => // 走NONE，Master的receive接收ElectedLeader，自行恢复
         (new BlackHolePersistenceEngine(), new MonarchyLeaderAgent(this))
     }
     persistenceEngine = persistenceEngine_
