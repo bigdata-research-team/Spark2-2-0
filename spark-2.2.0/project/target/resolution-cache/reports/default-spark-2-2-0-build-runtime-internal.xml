@@ -9,7 +9,7 @@
 		extra-sbtVersion="0.13"
 		conf="runtime-internal"
 		confs="compile, runtime, test, provided, optional, compile-internal, runtime-internal, test-internal, plugin, sources, docs, pom, scala-tool"
-		date="20190131142837"/>
+		date="20190225152814"/>
 	<dependencies>
 		<module organisation="org.spark-project" name="sbt-pom-reader">
 			<revision name="1.0.0-spark" status="release" pubdate="20160609023951" resolver="sbt-chain" artresolver="sbt-chain" homepage="https://github.com/joshrosen/sbt-pom-reader" extra-scalaVersion="2.10" extra-sbtVersion="0.13" downloaded="false" searched="false" default="false" conf="default, compile, runtime, default(compile), master" position="36">

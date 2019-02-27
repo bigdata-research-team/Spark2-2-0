@@ -4,7 +4,7 @@
 		module="spark-2-2-0-build"
 		revision="0.1-SNAPSHOT"
 		status="integration"
-		publication="20190131142837"
+		publication="20190225152814"
 		e:sbtVersion="0.13" e:scalaVersion="2.10"
 	>
 		<description>
