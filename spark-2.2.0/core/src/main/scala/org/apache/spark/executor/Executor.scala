@@ -187,6 +187,7 @@ private[spark] class Executor(
 
   private[executor] def numRunningTasks: Int = runningTasks.size()
 
+  // 运行Task
   def launchTask(context: ExecutorBackend, taskDescription: TaskDescription): Unit = {
     val tr = new TaskRunner(context, taskDescription) // 创建TaskRunner
     runningTasks.put(taskDescription.taskId, tr) // 将TaskId与TaskRunner的对应关系放入runningTasks
@@ -263,7 +264,7 @@ private[spark] class Executor(
 
     /** Whether this task has been finished. */
     @GuardedBy("TaskRunner.this")
-    private var finished = false
+    private var finished = false // 是否已完成
 
     def isFinished: Boolean = synchronized { finished }
 
@@ -308,7 +309,7 @@ private[spark] class Executor(
       threadId = Thread.currentThread.getId
       Thread.currentThread.setName(threadName)
       val threadMXBean = ManagementFactory.getThreadMXBean
-      val taskMemoryManager = new TaskMemoryManager(env.memoryManager, taskId) // 创建taskManager
+      val taskMemoryManager = new TaskMemoryManager(env.memoryManager, taskId) // 创建taskMemoryManager
       val deserializeStartTime = System.currentTimeMillis()
       val deserializeStartCpuTime = if (threadMXBean.isCurrentThreadCpuTimeSupported) {
         threadMXBean.getCurrentThreadCpuTime
@@ -353,7 +354,7 @@ private[spark] class Executor(
           threadMXBean.getCurrentThreadCpuTime
         } else 0L
         var threwException = true
-        // 运行Task
+        // 运行Task,控制资源
         val value = try {
           val res = task.run(
             taskAttemptId = taskId,
@@ -438,7 +439,7 @@ private[spark] class Executor(
               s"dropping it.")
             // 只会将结果大小序列化，并且不会保存执行结果
             ser.serialize(new IndirectTaskResult[Any](TaskResultBlockId(taskId), resultSize))
-            // 如果任务尝试运行的结果小于maxResultSize，且大于maxDirectResultSize，
+            // Task运行的结果如果小于等于maxResultSize且大于maxDirectResultSize，则会写入本地存储体系。
           } else if (resultSize > maxDirectResultSize) {
             val blockId = TaskResultBlockId(taskId)
             env.blockManager.putBytes(
@@ -450,7 +451,7 @@ private[spark] class Executor(
               s"Finished $taskName (TID $taskId). $resultSize bytes result sent via BlockManager)")
             // 并将结果大小序列化
             ser.serialize(new IndirectTaskResult[Any](blockId, resultSize))
-            // 如果任务尝试运行的结果小于等于maxDirectResultSize，
+            // Task运行的结果如果小于等于maxDirectResult，则会直接返回给Driver
           } else {
             logInfo(s"Finished $taskName (TID $taskId). $resultSize bytes result sent to driver")
             // 则将结果序列化
@@ -788,7 +789,7 @@ private[spark] class Executor(
     val intervalMs = conf.getTimeAsMs("spark.executor.heartbeatInterval", "10s")
 
     // Wait a random interval so the heartbeats don't end up in sync
-    // TODO 获取心跳定时器第一次执行的时间延迟initialDelay。（intervalMs + 随机数）
+    // 获取心跳定时器第一次执行的时间延迟initialDelay。（intervalMs + 随机数）
     val initialDelay = intervalMs + (math.random * intervalMs).asInstanceOf[Int]
 
     // 通过Utils.logUncaughtExceptions方法调用reportHeartBeat方法报告心跳

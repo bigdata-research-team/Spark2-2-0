@@ -67,6 +67,7 @@ private[memory] class ExecutionMemoryPool(
   /**
    * Returns the memory consumption, in bytes, for the given task.
    */
+  // taskAttemptId对应的所消费的内存
   def getMemoryUsageForTask(taskAttemptId: Long): Long = lock.synchronized {
     memoryForTask.getOrElse(taskAttemptId, 0L)
   }

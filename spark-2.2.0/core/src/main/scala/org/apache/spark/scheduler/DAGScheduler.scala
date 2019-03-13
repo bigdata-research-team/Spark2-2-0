@@ -188,7 +188,7 @@ class DAGScheduler(
   private val closureSerializer = SparkEnv.get.closureSerializer.newInstance()
 
   /** If enabled, FetchFailed will not cause stage retry, in order to surface the problem. */
-    // 在测试过程中，当发生FetchFailed时使用此属性则不会对Stage进行充实，可以通过spark.test.noStageRetry进行配置，默认为false
+    // 在测试过程中，当发生FetchFailed时使用此属性则不会对Stage进行重试，可以通过spark.test.noStageRetry进行配置，默认为false
   private val disallowStageRetryForTest = sc.getConf.getBoolean("spark.test.noStageRetry", false)
 
   /**
@@ -333,22 +333,26 @@ class DAGScheduler(
    * regenerating data.
    */
   def createShuffleMapStage(shuffleDep: ShuffleDependency[_, _, _], jobId: Int): ShuffleMapStage = {
-    val rdd = shuffleDep.rdd
-    val numTasks = rdd.partitions.length
-    val parents = getOrCreateParentStages(rdd, jobId)
-    val id = nextStageId.getAndIncrement()
-    val stage = new ShuffleMapStage(id, rdd, numTasks, parents, jobId, rdd.creationSite, shuffleDep)
+    val rdd = shuffleDep.rdd // 获取发生宽依赖的那个RDD的属性，作为要创建ShuffleMapStage的rdd
+    val numTasks = rdd.partitions.length // 获取该rdd的分区数，map任务数量与RDD的各个分区一一对应
+    val parents = getOrCreateParentStages(rdd, jobId) // 获取该stage的所有父Stage
+    val id = nextStageId.getAndIncrement() // 生成该stage的id
+    val stage = new ShuffleMapStage(id, rdd, numTasks, parents, jobId, rdd.creationSite, shuffleDep) // 创建stage
 
-    stageIdToStage(id) = stage
-    shuffleIdToMapStage(shuffleDep.shuffleId) = stage
-    updateJobIdStageIdMaps(jobId, stage)
+    stageIdToStage(id) = stage// 新创建的ShuffleMapStageId和ShuffleMapStage的映射关系
+    shuffleIdToMapStage(shuffleDep.shuffleId) = stage // ShuffleId与ShuffleMapStage的映射关系
+    updateJobIdStageIdMaps(jobId, stage) // 更新JobId与MapStage及其所有祖先的映射关系
 
-    if (mapOutputTracker.containsShuffle(shuffleDep.shuffleId)) {
+    if (mapOutputTracker.containsShuffle(shuffleDep.shuffleId)) { // 判断mapOutputTracker是否包含shuffID对应的MapStatus
+      // 由于重试机制，如果存在则说明当前stage可能在之前已经执行过，
+      // 在上一次的执行过程中，部分map任务可能执行成功，MapOutPutTrackerMaster中将缓存这些成功的map任务的MapStaus，
+      // 因而当前stage只需要从MapOutPutTrackerMaster中复制这些MapStatus即可，避免了重复计算
+
       // A previously run stage generated partitions for this shuffle, so for each output
       // that's still available, copy information about that output location to the new stage
       // (so we don't unnecessarily re-compute that data).
-      val serLocs = mapOutputTracker.getSerializedMapOutputStatuses(shuffleDep.shuffleId)
-      val locs = MapOutputTracker.deserializeMapStatuses(serLocs)
+      val serLocs = mapOutputTracker.getSerializedMapOutputStatuses(shuffleDep.shuffleId) // 获取MapStatus序列化
+      val locs = MapOutputTracker.deserializeMapStatuses(serLocs) // 反序列化得到MapStatus
       (0 until locs.length).foreach { i =>
         if (locs(i) ne null) {
           // locs(i) will be null if missing
@@ -356,6 +360,7 @@ class DAGScheduler(
         }
       }
     } else {
+      // 如果不存在，则注册shuffleID与对应的MapStatus的映射关系
       // Kind of ugly: need to register RDDs with the cache and map output tracker here
       // since we can't do it in the RDD constructor because # of partitions is unknown
       logInfo("Registering RDD " + rdd.id + " (" + rdd.getCreationSite + ")")

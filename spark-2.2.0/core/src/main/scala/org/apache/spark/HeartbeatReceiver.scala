@@ -91,7 +91,8 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
   private val checkTimeoutIntervalMs =
     sc.conf.getTimeAsSeconds("spark.network.timeoutInterval", s"${timeoutIntervalMs}ms") * 1000
 
-  private var timeoutCheckingTask: ScheduledFuture[_] = null // 向eventLoopThread提交执行超时检查的定时任务后返回的ScheduledFuture，提交的定时任务的执行间隔为checkTimeoutIntervalMs
+  // 向eventLoopThread提交执行超时检查的定时任务后返回的ScheduledFuture，提交的定时任务的执行间隔为checkTimeoutIntervalMs
+  private var timeoutCheckingTask: ScheduledFuture[_] = null
 
   // "eventLoopThread" is used to run some pretty fast actions. The actions running in it should not
   // block the thread for a long time.
@@ -102,6 +103,8 @@ private[spark] class HeartbeatReceiver(sc: SparkContext, clock: Clock)
   // 运行的单线程用于kill掉Executor
   private val killExecutorThread = ThreadUtils.newDaemonSingleThreadExecutor("kill-executor-thread")
 
+  // 当向Dispatcher消息调度器注册HeartbeatReceiver时，与HeartbeatReceiver对应的inbox将向自身的message列表中放入OnStart消息，之后
+  // Dispatcher将处理OnStart消息，并调用HeartbeatReceiver的OnStart方法
   override def onStart(): Unit = {
     // 创建定时调度timeoutCheckingTask，按照checkTimeoutIntervalMs指定的间隔，想HeartBeatReceiver自身发送ExpireDeadHosts消息
     timeoutCheckingTask = eventLoopThread.scheduleAtFixedRate(new Runnable {

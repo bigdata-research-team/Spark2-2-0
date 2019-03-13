@@ -708,7 +708,7 @@ private[deploy] class Master(
           // scheduling executors on this worker until we use all of its resources.
           // Otherwise, just move on to the next worker.
           // 如果spreadOutApps = true，则keepScheduling = false，会导致pos位的WorkInfo资源调度提前结束，Application需要的其他Executor资源会在其他WorkInfo上调度
-          // 如果spreadOutApps = false， 则应用需要的Executor资源会不断从pos位的WorkInfo上调度，直到pos位的WorkInfo资源被使用完
+          // 如果spreadOutApps = false，则应用需要的Executor资源会不断从pos位的WorkInfo上调度，直到pos位的WorkInfo资源被使用完
           if (spreadOutApps) {
             keepScheduling = false
           }
